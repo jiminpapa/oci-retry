@@ -19,11 +19,25 @@ jobs:
           oci --version
 
       - name: Configure OCI CLI
+        env:
+          OCI_USER_ID: ${{ secrets.OCI_USER_ID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_ID }}
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
         run: |
           mkdir -p ~/.oci
-          printf '[DEFAULT]\nuser=${{ secrets.OCI_USER_ID }}\nfingerprint=${{ secrets.OCI_FINGERPRINT }}\nkey_file=~/.oci/oci_api_key.pem\ntenancy=${{ secrets.OCI_TENANCY_ID }}\nregion=ap-osaka-1\n' > ~/.oci/config
-          printf '%s\n' '${{ secrets.OCI_API_KEY }}' > ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_ID}
+          fingerprint=${OCI_FINGERPRINT}
+          key_file=~/.oci/oci_api_key.pem
+          tenancy=${OCI_TENANCY_ID}
+          region=ap-osaka-1
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/.oci/config
+          echo "${OCI_API_KEY}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
+          cat ~/.oci/config
 
       - name: Run retry script
         env:
