@@ -1,44 +1,30 @@
 name: OCI A1 Auto Retry
 
 on:
-  # 5분마다 실행 (GitHub은 최소 5분 간격, 실제로는 1~15분 지연 가능)
   schedule:
     - cron: '*/5 * * * *'
-  # 수동 실행
   workflow_dispatch:
 
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 4  # 5분 cron이므로 4분 타임아웃
+    timeout-minutes: 4
 
     steps:
       - uses: actions/checkout@v4
 
-      # OCI CLI 설치
       - name: Install OCI CLI
         run: |
           pip install oci-cli --quiet
           oci --version
 
-      # OCI 설정 파일 생성
       - name: Configure OCI CLI
         run: |
           mkdir -p ~/.oci
-          cat > ~/.oci/config << 'OCIEOF'
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_ID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          key_file=~/.oci/oci_api_key.pem
-          tenancy=${{ secrets.OCI_TENANCY_ID }}
-          region=ap-osaka-1
-          OCIEOF
-          # 들여쓰기 제거
-          sed -i 's/^          //' ~/.oci/config
-          echo "${{ secrets.OCI_API_KEY }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
+          printf '[DEFAULT]\nuser=${{ secrets.OCI_USER_ID }}\nfingerprint=${{ secrets.OCI_FINGERPRINT }}\nkey_file=~/.oci/oci_api_key.pem\ntenancy=${{ secrets.OCI_TENANCY_ID }}\nregion=ap-osaka-1\n' > ~/.oci/config
+          printf '%s\n' '${{ secrets.OCI_API_KEY }}' > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
-      # 인스턴스 생성 시도
       - name: Run retry script
         env:
           OCI_SSH_PUB_KEY: ${{ secrets.OCI_SSH_PUB_KEY }}
