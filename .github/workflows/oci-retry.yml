@@ -26,18 +26,14 @@ jobs:
           OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
         run: |
           mkdir -p ~/.oci
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${OCI_USER_ID}
-          fingerprint=${OCI_FINGERPRINT}
-          key_file=~/.oci/oci_api_key.pem
-          tenancy=${OCI_TENANCY_ID}
-          region=ap-osaka-1
-          EOF
-          sed -i 's/^[[:space:]]*//' ~/.oci/config
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${OCI_USER_ID}" >> ~/.oci/config
+          echo "fingerprint=${OCI_FINGERPRINT}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "tenancy=${OCI_TENANCY_ID}" >> ~/.oci/config
+          echo "region=ap-osaka-1" >> ~/.oci/config
           echo "${OCI_API_KEY}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
-          cat ~/.oci/config
 
       - name: Run retry script
         env:
