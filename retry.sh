@@ -17,10 +17,10 @@ REGIONS=("ap-osaka-1" "ap-seoul-1" "ap-chuncheon-1" "ap-tokyo-1")
 # ===== 함수 =====
 
 log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
 }
 
-# 텔레그램 알림 (선택사항 - TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID 설정 시)
+# 텔레그램 알림 (선택사항)
 notify() {
   local msg="$1"
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
@@ -29,7 +29,6 @@ notify() {
       -d text="${msg}" \
       -d parse_mode="Markdown" > /dev/null 2>&1 || true
   fi
-  # Discord 웹훅 (DISCORD_WEBHOOK_URL 설정 시)
   if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     curl -s -X POST "${DISCORD_WEBHOOK_URL}" \
       -H "Content-Type: application/json" \
@@ -49,27 +48,26 @@ check_region_subscription() {
   if [[ "$result" == *"$region"* ]]; then
     return 0
   else
-    log "[$region] 리전 미구독: $result"
+    log "[$region] 리전 미구독 - 스킵"
     return 1
   fi
 }
 
 # 리전에 VCN/서브넷이 있는지 확인, 없으면 자동 생성
+# 반환값: stdout에 subnet_id만 출력 (log는 stderr로)
 ensure_network() {
   local region="$1"
   log "[$region] 네트워크 확인 중..."
 
   # 기존 VCN 검색
-  local vcn_id vcn_result
-  vcn_result=$(oci network vcn list \
+  local vcn_id
+  vcn_id=$(oci network vcn list \
     --compartment-id "$TENANCY_ID" \
     --region "$region" \
     --display-name "vcn-a1-free" \
     --lifecycle-state AVAILABLE \
     --query 'data[0].id' --raw-output 2>&1) || true
-  vcn_id="$vcn_result"
 
-  # VCN list 자체가 에러인 경우
   if [[ "$vcn_id" == *"Error"* || "$vcn_id" == *"error"* || "$vcn_id" == *"Exception"* ]]; then
     log "[$region] VCN 조회 실패: $(echo "$vcn_id" | head -3)"
     return 1
@@ -111,7 +109,7 @@ ensure_network() {
     fi
     log "[$region] IGW 생성 완료: $igw_id"
 
-    # 라우트 테이블에 인터넷 게이트웨이 추가
+    # 라우트 테이블
     local rt_id
     rt_id=$(oci network route-table list \
       --compartment-id "$TENANCY_ID" \
@@ -126,7 +124,7 @@ ensure_network() {
       --force > /dev/null 2>&1 || true
     log "[$region] 라우트 테이블 업데이트 완료"
 
-    # 보안 목록에 SSH(22) + HTTP(80/443) 인바운드 허용
+    # 보안 목록
     local sl_id
     sl_id=$(oci network security-list list \
       --compartment-id "$TENANCY_ID" \
@@ -152,15 +150,14 @@ ensure_network() {
   fi
 
   # 서브넷 확인/생성
-  local subnet_id subnet_result
-  subnet_result=$(oci network subnet list \
+  local subnet_id
+  subnet_id=$(oci network subnet list \
     --compartment-id "$TENANCY_ID" \
     --region "$region" \
     --vcn-id "$vcn_id" \
     --display-name "subnet-a1-free" \
     --lifecycle-state AVAILABLE \
     --query 'data[0].id' --raw-output 2>&1) || true
-  subnet_id="$subnet_result"
 
   if [[ -z "$subnet_id" || "$subnet_id" == "null" || "$subnet_id" == "None" || "$subnet_id" == *"Error"* ]]; then
     log "[$region] 서브넷 생성 중..."
@@ -184,6 +181,7 @@ ensure_network() {
     log "[$region] 기존 서브넷 사용: $subnet_id"
   fi
 
+  # stdout에 subnet_id만 출력
   echo "$subnet_id"
 }
 
@@ -219,7 +217,7 @@ try_launch() {
 
   log "[$region] 인스턴스 생성 시도 (AD: $ad)..."
 
-  # SSH 공개키를 임시 파일로 저장 (OCI CLI는 --ssh-authorized-keys-file만 지원)
+  # SSH 공개키를 임시 파일로 저장
   local ssh_key_file
   ssh_key_file=$(mktemp)
   echo "$SSH_PUB_KEY" > "$ssh_key_file"
@@ -244,7 +242,6 @@ try_launch() {
     instance_id=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo "확인필요")
     log "SUCCESS! [$region] 인스턴스 생성 성공!"
     log "인스턴스 ID: $instance_id"
-    log "결과: $result"
     notify "🎉 *OCI A1 인스턴스 생성 성공!*\n리전: \`$region\`\nAD: \`$ad\`\nID: \`$instance_id\`"
     return 0
   fi
@@ -259,9 +256,8 @@ try_launch() {
     return 1
   fi
 
-  # 기타 오류 - 상세 출력
   log "[$region] 기타 오류:"
-  echo "$result" | head -20
+  echo "$result" | head -20 >&2
   return 1
 }
 
@@ -278,21 +274,28 @@ if [[ -z "$SSH_PUB_KEY" ]]; then
   exit 1
 fi
 
-# 리전 구독 현황 확인
-log "--- 리전 구독 확인 ---"
+# 구독된 리전만 필터링
+SUBSCRIBED_REGIONS=()
 for region in "${REGIONS[@]}"; do
-  check_region_subscription "$region"
+  if check_region_subscription "$region"; then
+    SUBSCRIBED_REGIONS+=("$region")
+  fi
 done
-log "--- 구독 확인 완료 ---"
 
-# 각 리전 순회
-for region in "${REGIONS[@]}"; do
+if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
+  log "ERROR: 구독된 리전이 없습니다"
+  exit 1
+fi
+log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
+
+# 구독된 리전만 순회
+for region in "${SUBSCRIBED_REGIONS[@]}"; do
   log "===== $region 시도 ====="
 
   # 네트워크 준비
   subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
 
-  # subnet_id가 유효한 OCID인지 확인
+  # subnet_id 유효성 확인
   if [[ "$subnet_id" != ocid1.subnet.* ]]; then
     log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
     continue
