@@ -2,7 +2,7 @@
 # OCI A1 Free Tier - Multi-Region Auto Retry Script
 # GitHub Actions에서 실행 (5분마다 cron)
 
-set -euo pipefail
+set -uo pipefail
 
 # ===== 설정 =====
 TENANCY_ID="ocid1.tenancy.oc1..aaaaaaaaxpz2u4vggintwglqy3gwznqkvwqfczcsx6bbckxn7cwfiwnnijqq"
@@ -60,10 +60,10 @@ ensure_network() {
       --cidr-blocks '["10.0.0.0/16"]' \
       --dns-label "vcna1free" \
       --wait-for-state AVAILABLE \
-      --query 'data.id' --raw-output 2>/dev/null)
+      --query 'data.id' --raw-output 2>&1) || true
 
-    if [[ -z "$vcn_id" || "$vcn_id" == "null" ]]; then
-      log "[$region] VCN 생성 실패"
+    if [[ -z "$vcn_id" || "$vcn_id" == "null" || "$vcn_id" == *"Error"* || "$vcn_id" == *"error"* ]]; then
+      log "[$region] VCN 생성 실패: $vcn_id"
       return 1
     fi
     log "[$region] VCN 생성 완료: $vcn_id"
@@ -77,7 +77,12 @@ ensure_network() {
       --display-name "igw-a1-free" \
       --is-enabled true \
       --wait-for-state AVAILABLE \
-      --query 'data.id' --raw-output 2>/dev/null)
+      --query 'data.id' --raw-output 2>/dev/null) || true
+
+    if [[ -z "$igw_id" || "$igw_id" == "null" ]]; then
+      log "[$region] IGW 생성 실패"
+      return 1
+    fi
     log "[$region] IGW 생성 완료: $igw_id"
 
     # 라우트 테이블에 인터넷 게이트웨이 추가
@@ -86,13 +91,13 @@ ensure_network() {
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
       --vcn-id "$vcn_id" \
-      --query 'data[0].id' --raw-output 2>/dev/null)
+      --query 'data[0].id' --raw-output 2>/dev/null) || true
 
     oci network route-table update \
       --rt-id "$rt_id" \
       --region "$region" \
       --route-rules "[{\"destination\":\"0.0.0.0/0\",\"destinationType\":\"CIDR_BLOCK\",\"networkEntityId\":\"$igw_id\"}]" \
-      --force > /dev/null 2>&1
+      --force > /dev/null 2>&1 || true
     log "[$region] 라우트 테이블 업데이트 완료"
 
     # 보안 목록에 SSH(22) + HTTP(80/443) 인바운드 허용
@@ -101,7 +106,7 @@ ensure_network() {
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
       --vcn-id "$vcn_id" \
-      --query 'data[0].id' --raw-output 2>/dev/null)
+      --query 'data[0].id' --raw-output 2>/dev/null) || true
 
     oci network security-list update \
       --security-list-id "$sl_id" \
@@ -114,7 +119,7 @@ ensure_network() {
         {"protocol":"1","source":"10.0.0.0/16","icmpOptions":{"type":3}}
       ]' \
       --egress-security-rules '[{"protocol":"all","destination":"0.0.0.0/0"}]' \
-      --force > /dev/null 2>&1
+      --force > /dev/null 2>&1 || true
     log "[$region] 보안 목록 업데이트 완료"
   else
     log "[$region] 기존 VCN 사용: $vcn_id"
@@ -138,7 +143,7 @@ ensure_network() {
     ad=$(oci iam availability-domain list \
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
-      --query 'data[0].name' --raw-output 2>/dev/null)
+      --query 'data[0].name' --raw-output 2>/dev/null) || true
 
     subnet_id=$(oci network subnet create \
       --compartment-id "$TENANCY_ID" \
@@ -148,7 +153,12 @@ ensure_network() {
       --cidr-block "10.0.0.0/24" \
       --dns-label "subneta1" \
       --wait-for-state AVAILABLE \
-      --query 'data.id' --raw-output 2>/dev/null)
+      --query 'data.id' --raw-output 2>/dev/null) || true
+
+    if [[ -z "$subnet_id" || "$subnet_id" == "null" ]]; then
+      log "[$region] 서브넷 생성 실패"
+      return 1
+    fi
     log "[$region] 서브넷 생성 완료: $subnet_id"
   else
     log "[$region] 기존 서브넷 사용: $subnet_id"
@@ -189,6 +199,11 @@ try_launch() {
 
   log "[$region] 인스턴스 생성 시도 (AD: $ad)..."
 
+  # SSH 공개키를 임시 파일로 저장 (OCI CLI는 --ssh-authorized-keys-file만 지원)
+  local ssh_key_file
+  ssh_key_file=$(mktemp)
+  echo "$SSH_PUB_KEY" > "$ssh_key_file"
+
   local result
   result=$(oci compute instance launch \
     --compartment-id "$TENANCY_ID" \
@@ -200,8 +215,9 @@ try_launch() {
     --shape-config "{\"ocpus\":$OCPU,\"memoryInGBs\":$RAM_GB}" \
     --display-name "$INSTANCE_NAME" \
     --assign-public-ip true \
-    --ssh-authorized-keys "$SSH_PUB_KEY" \
+    --ssh-authorized-keys-file "$ssh_key_file" \
     2>&1) || true
+  rm -f "$ssh_key_file"
 
   if echo "$result" | grep -q '"lifecycle-state"'; then
     local ip
