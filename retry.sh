@@ -37,23 +37,48 @@ notify() {
   fi
 }
 
+# 리전 구독 확인
+check_region_subscription() {
+  local region="$1"
+  local result
+  result=$(oci iam region-subscription list \
+    --tenancy-id "$TENANCY_ID" \
+    --query "data[?\"region-name\"=='$region'].\"region-name\"" \
+    --raw-output 2>&1) || true
+
+  if [[ "$result" == *"$region"* ]]; then
+    return 0
+  else
+    log "[$region] 리전 미구독: $result"
+    return 1
+  fi
+}
+
 # 리전에 VCN/서브넷이 있는지 확인, 없으면 자동 생성
 ensure_network() {
   local region="$1"
   log "[$region] 네트워크 확인 중..."
 
   # 기존 VCN 검색
-  local vcn_id
-  vcn_id=$(oci network vcn list \
+  local vcn_id vcn_result
+  vcn_result=$(oci network vcn list \
     --compartment-id "$TENANCY_ID" \
     --region "$region" \
     --display-name "vcn-a1-free" \
     --lifecycle-state AVAILABLE \
-    --query 'data[0].id' --raw-output 2>/dev/null || echo "")
+    --query 'data[0].id' --raw-output 2>&1) || true
+  vcn_id="$vcn_result"
 
-  if [[ -z "$vcn_id" || "$vcn_id" == "null" ]]; then
+  # VCN list 자체가 에러인 경우
+  if [[ "$vcn_id" == *"Error"* || "$vcn_id" == *"error"* || "$vcn_id" == *"Exception"* ]]; then
+    log "[$region] VCN 조회 실패: $(echo "$vcn_id" | head -3)"
+    return 1
+  fi
+
+  if [[ -z "$vcn_id" || "$vcn_id" == "null" || "$vcn_id" == "None" ]]; then
     log "[$region] VCN 생성 중..."
-    vcn_id=$(oci network vcn create \
+    local create_result
+    create_result=$(oci network vcn create \
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
       --display-name "vcn-a1-free" \
@@ -62,10 +87,11 @@ ensure_network() {
       --wait-for-state AVAILABLE \
       --query 'data.id' --raw-output 2>&1) || true
 
-    if [[ -z "$vcn_id" || "$vcn_id" == "null" || "$vcn_id" == *"Error"* || "$vcn_id" == *"error"* ]]; then
-      log "[$region] VCN 생성 실패: $vcn_id"
+    if [[ -z "$create_result" || "$create_result" == "null" || "$create_result" == *"Error"* || "$create_result" == *"error"* ]]; then
+      log "[$region] VCN 생성 실패: $(echo "$create_result" | head -5)"
       return 1
     fi
+    vcn_id="$create_result"
     log "[$region] VCN 생성 완료: $vcn_id"
 
     # 인터넷 게이트웨이 생성
@@ -77,10 +103,10 @@ ensure_network() {
       --display-name "igw-a1-free" \
       --is-enabled true \
       --wait-for-state AVAILABLE \
-      --query 'data.id' --raw-output 2>/dev/null) || true
+      --query 'data.id' --raw-output 2>&1) || true
 
-    if [[ -z "$igw_id" || "$igw_id" == "null" ]]; then
-      log "[$region] IGW 생성 실패"
+    if [[ -z "$igw_id" || "$igw_id" == "null" || "$igw_id" == *"Error"* ]]; then
+      log "[$region] IGW 생성 실패: $(echo "$igw_id" | head -3)"
       return 1
     fi
     log "[$region] IGW 생성 완료: $igw_id"
@@ -91,7 +117,7 @@ ensure_network() {
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
       --vcn-id "$vcn_id" \
-      --query 'data[0].id' --raw-output 2>/dev/null) || true
+      --query 'data[0].id' --raw-output 2>&1) || true
 
     oci network route-table update \
       --rt-id "$rt_id" \
@@ -106,7 +132,7 @@ ensure_network() {
       --compartment-id "$TENANCY_ID" \
       --region "$region" \
       --vcn-id "$vcn_id" \
-      --query 'data[0].id' --raw-output 2>/dev/null) || true
+      --query 'data[0].id' --raw-output 2>&1) || true
 
     oci network security-list update \
       --security-list-id "$sl_id" \
@@ -126,24 +152,18 @@ ensure_network() {
   fi
 
   # 서브넷 확인/생성
-  local subnet_id
-  subnet_id=$(oci network subnet list \
+  local subnet_id subnet_result
+  subnet_result=$(oci network subnet list \
     --compartment-id "$TENANCY_ID" \
     --region "$region" \
     --vcn-id "$vcn_id" \
     --display-name "subnet-a1-free" \
     --lifecycle-state AVAILABLE \
-    --query 'data[0].id' --raw-output 2>/dev/null || echo "")
+    --query 'data[0].id' --raw-output 2>&1) || true
+  subnet_id="$subnet_result"
 
-  if [[ -z "$subnet_id" || "$subnet_id" == "null" ]]; then
+  if [[ -z "$subnet_id" || "$subnet_id" == "null" || "$subnet_id" == "None" || "$subnet_id" == *"Error"* ]]; then
     log "[$region] 서브넷 생성 중..."
-
-    # AD 목록 조회
-    local ad
-    ad=$(oci iam availability-domain list \
-      --compartment-id "$TENANCY_ID" \
-      --region "$region" \
-      --query 'data[0].name' --raw-output 2>/dev/null) || true
 
     subnet_id=$(oci network subnet create \
       --compartment-id "$TENANCY_ID" \
@@ -153,10 +173,10 @@ ensure_network() {
       --cidr-block "10.0.0.0/24" \
       --dns-label "subneta1" \
       --wait-for-state AVAILABLE \
-      --query 'data.id' --raw-output 2>/dev/null) || true
+      --query 'data.id' --raw-output 2>&1) || true
 
-    if [[ -z "$subnet_id" || "$subnet_id" == "null" ]]; then
-      log "[$region] 서브넷 생성 실패"
+    if [[ -z "$subnet_id" || "$subnet_id" == "null" || "$subnet_id" == *"Error"* ]]; then
+      log "[$region] 서브넷 생성 실패: $(echo "$subnet_id" | head -3)"
       return 1
     fi
     log "[$region] 서브넷 생성 완료: $subnet_id"
@@ -220,11 +240,12 @@ try_launch() {
   rm -f "$ssh_key_file"
 
   if echo "$result" | grep -q '"lifecycle-state"'; then
-    local ip
-    ip=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo "확인필요")
+    local instance_id
+    instance_id=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo "확인필요")
     log "SUCCESS! [$region] 인스턴스 생성 성공!"
+    log "인스턴스 ID: $instance_id"
     log "결과: $result"
-    notify "🎉 *OCI A1 인스턴스 생성 성공!*\n리전: \`$region\`\nAD: \`$ad\`\n\n결과:\n\`\`\`$result\`\`\`"
+    notify "🎉 *OCI A1 인스턴스 생성 성공!*\n리전: \`$region\`\nAD: \`$ad\`\nID: \`$instance_id\`"
     return 0
   fi
 
@@ -238,7 +259,9 @@ try_launch() {
     return 1
   fi
 
-  log "[$region] 기타 오류: $(echo "$result" | head -3)"
+  # 기타 오류 - 상세 출력
+  log "[$region] 기타 오류:"
+  echo "$result" | head -20
   return 1
 }
 
@@ -255,12 +278,25 @@ if [[ -z "$SSH_PUB_KEY" ]]; then
   exit 1
 fi
 
+# 리전 구독 현황 확인
+log "--- 리전 구독 확인 ---"
+for region in "${REGIONS[@]}"; do
+  check_region_subscription "$region"
+done
+log "--- 구독 확인 완료 ---"
+
 # 각 리전 순회
 for region in "${REGIONS[@]}"; do
   log "===== $region 시도 ====="
 
   # 네트워크 준비
   subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
+
+  # subnet_id가 유효한 OCID인지 확인
+  if [[ "$subnet_id" != ocid1.subnet.* ]]; then
+    log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
+    continue
+  fi
 
   # 이미지 조회
   image_id=$(get_image_id "$region")
