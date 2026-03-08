@@ -263,64 +263,82 @@ try_launch() {
 
 # ===== 메인 =====
 
-log "=== OCI A1 Multi-Region Auto Retry ==="
-log "리전: ${REGIONS[*]}"
-log "스펙: ${OCPU} OCPU / ${RAM_GB}GB RAM"
+  log "=== OCI A1 Multi-Region Auto Retry ==="
+  log "리전: ${REGIONS[*]}"
+  log "스펙: ${OCPU} OCPU / ${RAM_GB}GB RAM"
 
-# SSH 공개키
-SSH_PUB_KEY="${OCI_SSH_PUB_KEY:-}"
-if [[ -z "$SSH_PUB_KEY" ]]; then
-  log "ERROR: OCI_SSH_PUB_KEY 환경변수가 없습니다"
-  exit 1
-fi
-
-# 구독된 리전만 필터링
-SUBSCRIBED_REGIONS=()
-for region in "${REGIONS[@]}"; do
-  if check_region_subscription "$region"; then
-    SUBSCRIBED_REGIONS+=("$region")
-  fi
-done
-
-if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
-  log "ERROR: 구독된 리전이 없습니다"
-  exit 1
-fi
-log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
-
-# 구독된 리전만 순회
-for region in "${SUBSCRIBED_REGIONS[@]}"; do
-  log "===== $region 시도 ====="
-
-  # 네트워크 준비
-  subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
-
-  # subnet_id 유효성 확인
-  if [[ "$subnet_id" != ocid1.subnet.* ]]; then
-    log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
-    continue
+  SSH_PUB_KEY="${OCI_SSH_PUB_KEY:-}"
+  if [[ -z "$SSH_PUB_KEY" ]]; then
+    log "ERROR: OCI_SSH_PUB_KEY 환경변수가 없습니다"
+    exit 1
   fi
 
-  # 이미지 조회
-  image_id=$(get_image_id "$region")
-  if [[ -z "$image_id" || "$image_id" == "null" ]]; then
-    log "[$region] Ubuntu 이미지 없음, 스킵"
-    continue
+  # 구독된 리전만 필터링
+  SUBSCRIBED_REGIONS=()
+  for region in "${REGIONS[@]}"; do
+    if check_region_subscription "$region"; then
+      SUBSCRIBED_REGIONS+=("$region")
+    fi
+  done
+
+  if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
+    log "ERROR: 구독된 리전이 없습니다"
+    exit 1
   fi
-  log "[$region] 이미지: $image_id"
+  log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
 
-  # AD별 시도
-  while IFS= read -r ad; do
-    [[ -z "$ad" ]] && continue
-    result_code=0
-    try_launch "$region" "$subnet_id" "$image_id" "$ad" || result_code=$?
+  # 네트워크/이미지는 처음 1번만 준비
+  declare -A REGION_SUBNET
+  declare -A REGION_IMAGE
+  declare -A REGION_ADS
 
-    case $result_code in
-      0) log "완료!"; notify "✅ 스크립트 종료 - 인스턴스 생성 성공"; exit 0 ;;
-      2) log "한도 초과 - 전체 중단"; notify "⚠️ LimitExceeded - 이미 인스턴스 존재"; exit 0 ;;
-      *) continue ;;
-    esac
-  done <<< "$(get_availability_domains "$region")"
-done
+  for region in "${SUBSCRIBED_REGIONS[@]}"; do
+    subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
+    if [[ "$subnet_id" != ocid1.subnet.* ]]; then
+      log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
+      continue
+    fi
+    image_id=$(get_image_id "$region")
+    if [[ -z "$image_id" || "$image_id" == "null" ]]; then
+      log "[$region] Ubuntu 이미지 없음, 스킵"
+      continue
+    fi
+    REGION_SUBNET[$region]="$subnet_id"
+    REGION_IMAGE[$region]="$image_id"
+    REGION_ADS[$region]=$(get_availability_domains "$region")
+    log "[$region] 준비 완료 - 이미지: $image_id"
+  done
 
-log "모든 리전 용량 부족 - 다음 실행에서 재시도"
+  # 최대 270초(4분 30초) 동안 30초 간격으로 반복 시도
+  START_TIME=$(date +%s)
+  MAX_DURATION=270
+  ATTEMPT=0
+
+  while true; do
+    ELAPSED=$(( $(date +%s) - START_TIME ))
+    if [[ $ELAPSED -ge $MAX_DURATION ]]; then
+      log "시간 초과 - 다음 실행에서 재시도"
+      break
+    fi
+
+    ATTEMPT=$((ATTEMPT + 1))
+    log "===== 시도 #$ATTEMPT (경과: ${ELAPSED}초) ====="
+
+    for region in "${!REGION_SUBNET[@]}"; do
+      while IFS= read -r ad; do
+        [[ -z "$ad" ]] && continue
+        result_code=0
+        try_launch "$region" "${REGION_SUBNET[$region]}" "${REGION_IMAGE[$region]}" "$ad" || result_code=$?
+        case $result_code in
+          0) notify "✅ 스크립트 종료 - 인스턴스 생성 성공"; exit 0 ;;
+          2) notify "⚠️ LimitExceeded - 이미 인스턴스 존재"; exit 0 ;;
+          *) continue ;;
+        esac
+      done <<< "${REGION_ADS[$region]}"
+    done
+
+    log "30초 후 재시도..."
+    sleep 30
+  done
+
+  log "모든 시도 완료 - 다음 실행에서 재시도"
