@@ -12,7 +12,7 @@ RAM_GB=6
 SHAPE="VM.Standard.A1.Flex"
 
 # 시도할 리전 목록 (가까운 순)
-REGIONS=("ap-osaka-1" "ap-seoul-1" "ap-chuncheon-1" "ap-tokyo-1")
+REGIONS=("ap-osaka-1") 
 
 # ===== 함수 =====
 
