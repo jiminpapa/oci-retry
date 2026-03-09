@@ -7,8 +7,8 @@ set -uo pipefail
 # ===== 설정 =====
 TENANCY_ID="ocid1.tenancy.oc1..aaaaaaaaxpz2u4vggintwglqy3gwznqkvwqfczcsx6bbckxn7cwfiwnnijqq"
 INSTANCE_NAME="vm-a1-free"
-OCPU=1
-RAM_GB=6
+OCPU=4
+RAM_GB=24
 SHAPE="VM.Standard.A1.Flex"
 
 # 시도할 리전 목록 (가까운 순)
