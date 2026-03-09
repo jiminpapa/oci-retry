@@ -309,9 +309,9 @@ try_launch() {
     log "[$region] 준비 완료 - 이미지: $image_id"
   done
 
-  # 최대 270초(4분 30초) 동안 15초 간격으로 반복 시도
+  # 최대 180초(3분) 동안 15초 간격으로 반복 시도
   START_TIME=$(date +%s)
-  MAX_DURATION=270
+  MAX_DURATION=180
   ATTEMPT=0
 
   while true; do
