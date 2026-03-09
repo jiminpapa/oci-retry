@@ -309,7 +309,7 @@ try_launch() {
     log "[$region] 준비 완료 - 이미지: $image_id"
   done
 
-  # 최대 270초(4분 30초) 동안 30초 간격으로 반복 시도
+  # 최대 270초(4분 30초) 동안 15초 간격으로 반복 시도
   START_TIME=$(date +%s)
   MAX_DURATION=270
   ATTEMPT=0
@@ -337,8 +337,8 @@ try_launch() {
       done <<< "${REGION_ADS[$region]}"
     done
 
-    log "30초 후 재시도..."
-    sleep 30
+    log "15초 후 재시도..."
+    sleep 15
   done
 
   log "모든 시도 완료 - 다음 실행에서 재시도"

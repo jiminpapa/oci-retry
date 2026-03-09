@@ -8,7 +8,7 @@ on:
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
