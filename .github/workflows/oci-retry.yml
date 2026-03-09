@@ -1,8 +1,6 @@
 name: OCI A1 Auto Retry
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
