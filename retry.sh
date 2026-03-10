@@ -313,9 +313,9 @@ run_stage() {
         case $result_code in
           0) return 0 ;;   # 성공
           2) return 2 ;;   # LimitExceeded (이미 존재)
-          3)               # 429 TooManyRequests → 5분 대기
-            log "[$instance_name] 429 감지 - 300초 대기..."
-            sleep 300
+          3)               # 429 TooManyRequests → 2분 대기
+            log "[$instance_name] 429 감지 - 120초 대기..."
+            sleep 120
             continue 2     # while true 루프로 돌아가기
             ;;
           *) continue ;;
