@@ -1,14 +1,14 @@
 #!/bin/bash
 # OCI A1 Free Tier - Multi-Region Auto Retry Script
-# GitHub Actions에서 실행 (5분마다 cron)
+# GitHub Actions에서 실행 (10분마다 cron)
 
 set -uo pipefail
 
 # ===== 설정 =====
 TENANCY_ID="ocid1.tenancy.oc1..aaaaaaaaxpz2u4vggintwglqy3gwznqkvwqfczcsx6bbckxn7cwfiwnnijqq"
 INSTANCE_NAME="vm-a1-free"
-OCPU=4
-RAM_GB=24
+OCPU=1
+RAM_GB=6
 SHAPE="VM.Standard.A1.Flex"
 
 # 시도할 리전 목록 (가까운 순)
@@ -243,7 +243,7 @@ try_launch() {
     log "SUCCESS! [$region] 인스턴스 생성 성공!"
     log "인스턴스 ID: $instance_id"
     notify "🎉 *OCI A1 인스턴스 생성 성공!*\n리전: \`$region\`\nAD: \`$ad\`\nID: \`$instance_id\`"
-    return 0
+    return 0  
   fi
 
   if echo "$result" | grep -q "LimitExceeded"; then
@@ -311,7 +311,7 @@ try_launch() {
 
   # 최대 180초(3분) 동안 15초 간격으로 반복 시도
   START_TIME=$(date +%s)
-  MAX_DURATION=180
+  MAX_DURATION=360
   ATTEMPT=0
 
   while true; do
@@ -323,7 +323,8 @@ try_launch() {
 
     ATTEMPT=$((ATTEMPT + 1))
     log "===== 시도 #$ATTEMPT (경과: ${ELAPSED}초) ====="
-
+    
+     # 최대 360초(6분) 동안 60초 간격으로 반복 시도   ← 내용 업데이트
     for region in "${!REGION_SUBNET[@]}"; do
       while IFS= read -r ad; do
         [[ -z "$ad" ]] && continue
@@ -337,8 +338,8 @@ try_launch() {
       done <<< "${REGION_ADS[$region]}"
     done
 
-    log "15초 후 재시도..."
-    sleep 15
+    log "60초 후 재시도..."
+    sleep 60
   done
 
   log "모든 시도 완료 - 다음 실행에서 재시도"
