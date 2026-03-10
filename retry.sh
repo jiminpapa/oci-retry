@@ -305,6 +305,7 @@ run_stage() {
     ATTEMPT=$((ATTEMPT + 1))
     log "[$instance_name] 시도 #$ATTEMPT (경과: ${ELAPSED}초)"
 
+    local got_429=false
     for region in "${!REGION_SUBNET[@]}"; do
       while IFS= read -r ad; do
         [[ -z "$ad" ]] && continue
@@ -313,18 +314,19 @@ run_stage() {
         case $result_code in
           0) return 0 ;;   # 성공
           2) return 2 ;;   # LimitExceeded (이미 존재)
-          3)               # 429 TooManyRequests → 60초 대기
-            log "[$instance_name] 429 감지 - 60초 대기..."
-            sleep 60
-            continue 2     # while true 루프로 돌아가기
-            ;;
+          3) got_429=true; break 2 ;;  # 429 → for/while 탈출 후 아래서 처리
           *) continue ;;
         esac
       done <<< "${REGION_ADS[$region]}"
     done
 
-    log "[$instance_name] 60초 후 재시도..."
-    sleep 60
+    if $got_429; then
+      log "[$instance_name] 429 감지 - 60초 대기..."
+      sleep 60
+    else
+      log "[$instance_name] 60초 후 재시도..."
+      sleep 60
+    fi
   done
 }
 
