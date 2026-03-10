@@ -268,6 +268,11 @@ try_launch() {
     return 1
   fi
 
+  if echo "$result" | grep -q "TooManyRequests"; then
+    log "[$region] 429 TooManyRequests - 요청 과다, 5분 대기 후 재시도..."
+    return 3
+  fi
+
   log "[$region] 기타 오류:"
   echo "$result" | head -20 >&2
   return 1
@@ -308,6 +313,11 @@ run_stage() {
         case $result_code in
           0) return 0 ;;   # 성공
           2) return 2 ;;   # LimitExceeded (이미 존재)
+          3)               # 429 TooManyRequests → 5분 대기
+            log "[$instance_name] 429 감지 - 300초 대기..."
+            sleep 300
+            continue 2     # while true 루프로 돌아가기
+            ;;
           *) continue ;;
         esac
       done <<< "${REGION_ADS[$region]}"
