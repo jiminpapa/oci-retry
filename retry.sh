@@ -1,18 +1,25 @@
 #!/bin/bash
-# OCI A1 Free Tier - Multi-Region Auto Retry Script
+# OCI A1 Free Tier - Multi-Region Auto Retry Script (2-Stage Strategy)
+# Stage 1: 1 OCPU / 6GB → 성공 시 Stage 2: 2 OCPU / 12GB
 # GitHub Actions에서 실행 (10분마다 cron)
 
 set -uo pipefail
 
 # ===== 설정 =====
 TENANCY_ID="ocid1.tenancy.oc1..aaaaaaaaxpz2u4vggintwglqy3gwznqkvwqfczcsx6bbckxn7cwfiwnnijqq"
-INSTANCE_NAME="vm-a1-free"
-OCPU=1
-RAM_GB=6
 SHAPE="VM.Standard.A1.Flex"
 
+# 2단계 스펙 정의
+STAGE1_NAME="vm-a1-free-1c"
+STAGE1_OCPU=1
+STAGE1_RAM=6
+
+STAGE2_NAME="vm-a1-free-2c"
+STAGE2_OCPU=2
+STAGE2_RAM=12
+
 # 시도할 리전 목록 (가까운 순)
-REGIONS=("ap-osaka-1") 
+REGIONS=("ap-osaka-1")
 
 # ===== 함수 =====
 
@@ -20,7 +27,7 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
 }
 
-# 텔레그램 알림 (선택사항)
+# 텔레그램/디스코드 알림 (선택사항)
 notify() {
   local msg="$1"
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
@@ -209,13 +216,18 @@ get_availability_domains() {
 }
 
 # 인스턴스 생성 시도
+# 사용법: try_launch <region> <subnet_id> <image_id> <ad> <instance_name> <ocpu> <ram_gb>
+# 반환: 0=성공, 1=용량부족/기타, 2=LimitExceeded(이미존재)
 try_launch() {
   local region="$1"
   local subnet_id="$2"
   local image_id="$3"
   local ad="$4"
+  local instance_name="$5"
+  local ocpu="$6"
+  local ram_gb="$7"
 
-  log "[$region] 인스턴스 생성 시도 (AD: $ad)..."
+  log "[$region] 인스턴스 생성 시도 (AD: $ad, ${ocpu}OCPU/${ram_gb}GB, 이름: $instance_name)..."
 
   # SSH 공개키를 임시 파일로 저장
   local ssh_key_file
@@ -230,8 +242,8 @@ try_launch() {
     --subnet-id "$subnet_id" \
     --image-id "$image_id" \
     --shape "$SHAPE" \
-    --shape-config "{\"ocpus\":$OCPU,\"memoryInGBs\":$RAM_GB}" \
-    --display-name "$INSTANCE_NAME" \
+    --shape-config "{\"ocpus\":$ocpu,\"memoryInGBs\":$ram_gb}" \
+    --display-name "$instance_name" \
     --assign-public-ip true \
     --ssh-authorized-keys-file "$ssh_key_file" \
     2>&1) || true
@@ -240,10 +252,10 @@ try_launch() {
   if echo "$result" | grep -q '"lifecycle-state"'; then
     local instance_id
     instance_id=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo "확인필요")
-    log "SUCCESS! [$region] 인스턴스 생성 성공!"
+    log "SUCCESS! [$region] 인스턴스 생성 성공! (${ocpu}OCPU/${ram_gb}GB)"
     log "인스턴스 ID: $instance_id"
-    notify "🎉 *OCI A1 인스턴스 생성 성공!*\n리전: \`$region\`\nAD: \`$ad\`\nID: \`$instance_id\`"
-    return 0  
+    notify "🎉 *OCI A1 인스턴스 생성 성공!*\n이름: \`$instance_name\`\n리전: \`$region\`\nAD: \`$ad\`\n스펙: ${ocpu}OCPU / ${ram_gb}GB\nID: \`$instance_id\`"
+    return 0
   fi
 
   if echo "$result" | grep -q "LimitExceeded"; then
@@ -261,85 +273,134 @@ try_launch() {
   return 1
 }
 
-# ===== 메인 =====
+# 한 스테이지를 시도하는 함수
+# 사용법: run_stage <instance_name> <ocpu> <ram_gb>
+# 반환: 0=성공, 1=실패/시간초과, 2=LimitExceeded
+run_stage() {
+  local instance_name="$1"
+  local ocpu="$2"
+  local ram_gb="$3"
 
-  log "=== OCI A1 Multi-Region Auto Retry ==="
-  log "리전: ${REGIONS[*]}"
-  log "스펙: ${OCPU} OCPU / ${RAM_GB}GB RAM"
+  log ""
+  log "===== STAGE: ${ocpu}OCPU/${ram_gb}GB ($instance_name) 시작 ====="
 
-  SSH_PUB_KEY="${OCI_SSH_PUB_KEY:-}"
-  if [[ -z "$SSH_PUB_KEY" ]]; then
-    log "ERROR: OCI_SSH_PUB_KEY 환경변수가 없습니다"
-    exit 1
-  fi
-
-  # 구독된 리전만 필터링
-  SUBSCRIBED_REGIONS=()
-  for region in "${REGIONS[@]}"; do
-    if check_region_subscription "$region"; then
-      SUBSCRIBED_REGIONS+=("$region")
-    fi
-  done
-
-  if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
-    log "ERROR: 구독된 리전이 없습니다"
-    exit 1
-  fi
-  log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
-
-  # 네트워크/이미지는 처음 1번만 준비
-  declare -A REGION_SUBNET
-  declare -A REGION_IMAGE
-  declare -A REGION_ADS
-
-  for region in "${SUBSCRIBED_REGIONS[@]}"; do
-    subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
-    if [[ "$subnet_id" != ocid1.subnet.* ]]; then
-      log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
-      continue
-    fi
-    image_id=$(get_image_id "$region")
-    if [[ -z "$image_id" || "$image_id" == "null" ]]; then
-      log "[$region] Ubuntu 이미지 없음, 스킵"
-      continue
-    fi
-    REGION_SUBNET[$region]="$subnet_id"
-    REGION_IMAGE[$region]="$image_id"
-    REGION_ADS[$region]=$(get_availability_domains "$region")
-    log "[$region] 준비 완료 - 이미지: $image_id"
-  done
-
-  # 최대 180초(3분) 동안 15초 간격으로 반복 시도
+  local START_TIME
   START_TIME=$(date +%s)
-  MAX_DURATION=360
-  ATTEMPT=0
+  local MAX_DURATION=360  # 6분
+  local ATTEMPT=0
 
   while true; do
+    local ELAPSED
     ELAPSED=$(( $(date +%s) - START_TIME ))
     if [[ $ELAPSED -ge $MAX_DURATION ]]; then
-      log "시간 초과 - 다음 실행에서 재시도"
-      break
+      log "[$instance_name] 시간 초과 (${ELAPSED}초) - 다음 실행에서 재시도"
+      return 1
     fi
 
     ATTEMPT=$((ATTEMPT + 1))
-    log "===== 시도 #$ATTEMPT (경과: ${ELAPSED}초) ====="
-    
-     # 최대 360초(6분) 동안 60초 간격으로 반복 시도   ← 내용 업데이트
+    log "[$instance_name] 시도 #$ATTEMPT (경과: ${ELAPSED}초)"
+
     for region in "${!REGION_SUBNET[@]}"; do
       while IFS= read -r ad; do
         [[ -z "$ad" ]] && continue
-        result_code=0
-        try_launch "$region" "${REGION_SUBNET[$region]}" "${REGION_IMAGE[$region]}" "$ad" || result_code=$?
+        local result_code=0
+        try_launch "$region" "${REGION_SUBNET[$region]}" "${REGION_IMAGE[$region]}" "$ad" "$instance_name" "$ocpu" "$ram_gb" || result_code=$?
         case $result_code in
-          0) notify "✅ 스크립트 종료 - 인스턴스 생성 성공"; exit 0 ;;
-          2) notify "⚠️ LimitExceeded - 이미 인스턴스 존재"; exit 0 ;;
+          0) return 0 ;;   # 성공
+          2) return 2 ;;   # LimitExceeded (이미 존재)
           *) continue ;;
         esac
       done <<< "${REGION_ADS[$region]}"
     done
 
-    log "60초 후 재시도..."
+    log "[$instance_name] 60초 후 재시도..."
     sleep 60
   done
+}
 
-  log "모든 시도 완료 - 다음 실행에서 재시도"
+# ===== 메인 =====
+
+log "=== OCI A1 Multi-Region Auto Retry (2-Stage) ==="
+log "리전: ${REGIONS[*]}"
+log "Stage 1: ${STAGE1_OCPU}OCPU / ${STAGE1_RAM}GB → Stage 2: ${STAGE2_OCPU}OCPU / ${STAGE2_RAM}GB"
+
+SSH_PUB_KEY="${OCI_SSH_PUB_KEY:-}"
+if [[ -z "$SSH_PUB_KEY" ]]; then
+  log "ERROR: OCI_SSH_PUB_KEY 환경변수가 없습니다"
+  exit 1
+fi
+
+# 구독된 리전만 필터링
+SUBSCRIBED_REGIONS=()
+for region in "${REGIONS[@]}"; do
+  if check_region_subscription "$region"; then
+    SUBSCRIBED_REGIONS+=("$region")
+  fi
+done
+
+if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
+  log "ERROR: 구독된 리전이 없습니다"
+  exit 1
+fi
+log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
+
+# 네트워크/이미지는 처음 1번만 준비
+declare -A REGION_SUBNET
+declare -A REGION_IMAGE
+declare -A REGION_ADS
+
+for region in "${SUBSCRIBED_REGIONS[@]}"; do
+  subnet_id=$(ensure_network "$region") || { log "[$region] 네트워크 준비 실패, 스킵"; continue; }
+  if [[ "$subnet_id" != ocid1.subnet.* ]]; then
+    log "[$region] 유효하지 않은 서브넷 ID: $subnet_id"
+    continue
+  fi
+  image_id=$(get_image_id "$region")
+  if [[ -z "$image_id" || "$image_id" == "null" ]]; then
+    log "[$region] Ubuntu 이미지 없음, 스킵"
+    continue
+  fi
+  REGION_SUBNET[$region]="$subnet_id"
+  REGION_IMAGE[$region]="$image_id"
+  REGION_ADS[$region]=$(get_availability_domains "$region")
+  log "[$region] 준비 완료 - 이미지: $image_id"
+done
+
+if [[ ${#REGION_SUBNET[@]} -eq 0 ]]; then
+  log "ERROR: 사용 가능한 리전이 없습니다"
+  exit 1
+fi
+
+# ===== Stage 1: 1 OCPU / 6GB =====
+stage1_result=0
+run_stage "$STAGE1_NAME" "$STAGE1_OCPU" "$STAGE1_RAM" || stage1_result=$?
+
+if [[ $stage1_result -eq 0 ]]; then
+  log ""
+  log "✅ Stage 1 성공! 30초 후 Stage 2 시도..."
+  notify "✅ *Stage 1 완료 (${STAGE1_OCPU}OCPU/${STAGE1_RAM}GB)*\n30초 후 Stage 2 (${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB) 시도..."
+  sleep 30
+
+  # ===== Stage 2: 2 OCPU / 12GB =====
+  stage2_result=0
+  run_stage "$STAGE2_NAME" "$STAGE2_OCPU" "$STAGE2_RAM" || stage2_result=$?
+
+  if [[ $stage2_result -eq 0 ]]; then
+    log "🎉 Stage 1 + Stage 2 모두 성공! 총 ${STAGE1_OCPU+STAGE2_OCPU}OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
+    notify "🎉 *Stage 1 + Stage 2 모두 성공!*\n총 $((STAGE1_OCPU+STAGE2_OCPU))OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
+  elif [[ $stage2_result -eq 2 ]]; then
+    log "⚠️ Stage 2: LimitExceeded (이미 존재하거나 한도 초과)"
+    notify "⚠️ *Stage 2 LimitExceeded* - 이미 인스턴스 존재하거나 한도 초과"
+  else
+    log "⏳ Stage 2 시간 초과 - 다음 실행에서 Stage 2만 재시도"
+    notify "⏳ *Stage 2 시간 초과* - 다음 실행에서 ${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB 재시도"
+  fi
+
+elif [[ $stage1_result -eq 2 ]]; then
+  log "⚠️ Stage 1: LimitExceeded - 이미 인스턴스 존재하거나 한도 초과"
+  notify "⚠️ *Stage 1 LimitExceeded* - 이미 인스턴스 존재"
+else
+  log "⏳ Stage 1 시간 초과 - 다음 실행에서 재시도"
+fi
+
+log "=== 스크립트 종료 ==="
