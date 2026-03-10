@@ -269,7 +269,7 @@ try_launch() {
   fi
 
   if echo "$result" | grep -q "TooManyRequests"; then
-    log "[$region] 429 TooManyRequests - 요청 과다, 5분 대기 후 재시도..."
+    log "[$region] 429 TooManyRequests - 요청 과다"
     return 3
   fi
 
