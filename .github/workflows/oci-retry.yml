@@ -3,6 +3,10 @@ name: OCI A1 Auto Retry
 on:
   workflow_dispatch:
 
+concurrency:
+  group: oci-retry
+  cancel-in-progress: true
+
 jobs:
   retry:
     runs-on: ubuntu-latest
