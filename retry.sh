@@ -49,7 +49,7 @@ check_region_subscription() {
   local result
   result=$(oci iam region-subscription list \
     --tenancy-id "$TENANCY_ID" \
-    --query "data[?\"region-name\"==\"$region\"].\"region-name\"" \
+    --query "data[?\"region-name\"=='$region'].\"region-name\"" \
     --raw-output 2>&1) || true
 
   if [[ "$result" == *"$region"* ]]; then
