@@ -49,7 +49,7 @@ check_region_subscription() {
   local result
   result=$(oci iam region-subscription list \
     --tenancy-id "$TENANCY_ID" \
-    --query "data[?\"region-name\"=='$region'].\"region-name\"" \
+    --query "data[?\"region-name\"==\"$region\"].\"region-name\"" \
     --raw-output 2>&1) || true
 
   if [[ "$result" == *"$region"* ]]; then
@@ -61,12 +61,10 @@ check_region_subscription() {
 }
 
 # 리전에 VCN/서브넷이 있는지 확인, 없으면 자동 생성
-# 반환값: stdout에 subnet_id만 출력 (log는 stderr로)
 ensure_network() {
   local region="$1"
   log "[$region] 네트워크 확인 중..."
 
-  # 기존 VCN 검색
   local vcn_id
   vcn_id=$(oci network vcn list \
     --compartment-id "$TENANCY_ID" \
@@ -142,13 +140,7 @@ ensure_network() {
     oci network security-list update \
       --security-list-id "$sl_id" \
       --region "$region" \
-      --ingress-security-rules '[
-        {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},
-        {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},
-        {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},
-        {"protocol":"1","source":"0.0.0.0/0","icmpOptions":{"type":3,"code":4}},
-        {"protocol":"1","source":"10.0.0.0/16","icmpOptions":{"type":3}}
-      ]' \
+      --ingress-security-rules '[{"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},{"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},{"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},{"protocol":"1","source":"0.0.0.0/0","icmpOptions":{"type":3,"code":4}},{"protocol":"1","source":"10.0.0.0/16","icmpOptions":{"type":3}}]' \
       --egress-security-rules '[{"protocol":"all","destination":"0.0.0.0/0"}]' \
       --force > /dev/null 2>&1 || true
     log "[$region] 보안 목록 업데이트 완료"
@@ -188,11 +180,10 @@ ensure_network() {
     log "[$region] 기존 서브넷 사용: $subnet_id"
   fi
 
-  # stdout에 subnet_id만 출력
   echo "$subnet_id"
 }
 
-# 리전에서 최신 Ubuntu 이미지 OCID 가져오기
+# 최신 Ubuntu 22.04 이미지 OCID
 get_image_id() {
   local region="$1"
   oci compute image list \
@@ -206,7 +197,7 @@ get_image_id() {
     --query 'data[0].id' --raw-output 2>/dev/null || echo ""
 }
 
-# 리전의 AD 목록 가져오기
+# AD 목록
 get_availability_domains() {
   local region="$1"
   oci iam availability-domain list \
@@ -216,8 +207,7 @@ get_availability_domains() {
 }
 
 # 인스턴스 생성 시도
-# 사용법: try_launch <region> <subnet_id> <image_id> <ad> <instance_name> <ocpu> <ram_gb>
-# 반환: 0=성공, 1=용량부족/기타, 2=LimitExceeded(이미존재)
+# 반환: 0=성공, 1=용량부족/기타, 2=LimitExceeded, 3=429
 try_launch() {
   local region="$1"
   local subnet_id="$2"
@@ -229,7 +219,6 @@ try_launch() {
 
   log "[$region] 인스턴스 생성 시도 (AD: $ad, ${ocpu}OCPU/${ram_gb}GB, 이름: $instance_name)..."
 
-  # SSH 공개키를 임시 파일로 저장
   local ssh_key_file
   ssh_key_file=$(mktemp)
   echo "$SSH_PUB_KEY" > "$ssh_key_file"
@@ -254,7 +243,7 @@ try_launch() {
     instance_id=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo "확인필요")
     log "SUCCESS! [$region] 인스턴스 생성 성공! (${ocpu}OCPU/${ram_gb}GB)"
     log "인스턴스 ID: $instance_id"
-    notify "🎉 *OCI A1 인스턴스 생성 성공!*\n이름: \`$instance_name\`\n리전: \`$region\`\nAD: \`$ad\`\n스펙: ${ocpu}OCPU / ${ram_gb}GB\nID: \`$instance_id\`"
+    notify "OCI A1 인스턴스 생성 성공! 이름: $instance_name 리전: $region AD: $ad 스펙: ${ocpu}OCPU / ${ram_gb}GB ID: $instance_id"
     return 0
   fi
 
@@ -278,8 +267,7 @@ try_launch() {
   return 1
 }
 
-# 한 스테이지를 시도하는 함수
-# 사용법: run_stage <instance_name> <ocpu> <ram_gb>
+# 한 스테이지 실행
 # 반환: 0=성공, 1=실패/시간초과, 2=LimitExceeded
 run_stage() {
   local instance_name="$1"
@@ -291,7 +279,7 @@ run_stage() {
 
   local START_TIME
   START_TIME=$(date +%s)
-  local MAX_DURATION=360  # 6분
+  local MAX_DURATION=500  # 8분 (10분 워크플로우 중 최대 활용)
   local ATTEMPT=0
 
   while true; do
@@ -312,17 +300,17 @@ run_stage() {
         local result_code=0
         try_launch "$region" "${REGION_SUBNET[$region]}" "${REGION_IMAGE[$region]}" "$ad" "$instance_name" "$ocpu" "$ram_gb" || result_code=$?
         case $result_code in
-          0) return 0 ;;   # 성공
-          2) return 2 ;;   # LimitExceeded (이미 존재)
-          3) got_429=true; break 2 ;;  # 429 → for/while 탈출 후 아래서 처리
+          0) return 0 ;;
+          2) return 2 ;;
+          3) got_429=true; break 2 ;;
           *) continue ;;
         esac
       done <<< "${REGION_ADS[$region]}"
     done
 
     if $got_429; then
-      log "[$instance_name] 429 감지 - 60초 대기..."
-      sleep 60
+      log "[$instance_name] 429 감지 - 120초 대기..."
+      sleep 120
     else
       log "[$instance_name] 60초 후 재시도..."
       sleep 60
@@ -342,7 +330,7 @@ if [[ -z "$SSH_PUB_KEY" ]]; then
   exit 1
 fi
 
-# 구독된 리전만 필터링
+# 구독된 리전 필터링
 SUBSCRIBED_REGIONS=()
 for region in "${REGIONS[@]}"; do
   if check_region_subscription "$region"; then
@@ -356,7 +344,7 @@ if [[ ${#SUBSCRIBED_REGIONS[@]} -eq 0 ]]; then
 fi
 log "구독된 리전: ${SUBSCRIBED_REGIONS[*]}"
 
-# 네트워크/이미지는 처음 1번만 준비
+# 네트워크/이미지 준비 (1번만)
 declare -A REGION_SUBNET
 declare -A REGION_IMAGE
 declare -A REGION_ADS
@@ -383,36 +371,36 @@ if [[ ${#REGION_SUBNET[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# ===== Stage 1: 1 OCPU / 6GB =====
+# Stage 1: 1 OCPU / 6GB
 stage1_result=0
 run_stage "$STAGE1_NAME" "$STAGE1_OCPU" "$STAGE1_RAM" || stage1_result=$?
 
 if [[ $stage1_result -eq 0 ]]; then
   log ""
-  log "✅ Stage 1 성공! 30초 후 Stage 2 시도..."
-  notify "✅ *Stage 1 완료 (${STAGE1_OCPU}OCPU/${STAGE1_RAM}GB)*\n30초 후 Stage 2 (${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB) 시도..."
+  log "Stage 1 성공! 30초 후 Stage 2 시도..."
+  notify "Stage 1 완료 (${STAGE1_OCPU}OCPU/${STAGE1_RAM}GB) 30초 후 Stage 2 (${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB) 시도..."
   sleep 30
 
-  # ===== Stage 2: 2 OCPU / 12GB =====
+  # Stage 2: 2 OCPU / 12GB
   stage2_result=0
   run_stage "$STAGE2_NAME" "$STAGE2_OCPU" "$STAGE2_RAM" || stage2_result=$?
 
   if [[ $stage2_result -eq 0 ]]; then
-    log "🎉 Stage 1 + Stage 2 모두 성공! 총 ${STAGE1_OCPU+STAGE2_OCPU}OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
-    notify "🎉 *Stage 1 + Stage 2 모두 성공!*\n총 $((STAGE1_OCPU+STAGE2_OCPU))OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
+    log "Stage 1 + Stage 2 모두 성공! 총 $((STAGE1_OCPU+STAGE2_OCPU))OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
+    notify "Stage 1 + Stage 2 모두 성공! 총 $((STAGE1_OCPU+STAGE2_OCPU))OCPU / $((STAGE1_RAM+STAGE2_RAM))GB 확보"
   elif [[ $stage2_result -eq 2 ]]; then
-    log "⚠️ Stage 2: LimitExceeded (이미 존재하거나 한도 초과)"
-    notify "⚠️ *Stage 2 LimitExceeded* - 이미 인스턴스 존재하거나 한도 초과"
+    log "Stage 2: LimitExceeded (이미 존재하거나 한도 초과)"
+    notify "Stage 2 LimitExceeded - 이미 인스턴스 존재하거나 한도 초과"
   else
-    log "⏳ Stage 2 시간 초과 - 다음 실행에서 Stage 2만 재시도"
-    notify "⏳ *Stage 2 시간 초과* - 다음 실행에서 ${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB 재시도"
+    log "Stage 2 시간 초과 - 다음 실행에서 Stage 2만 재시도"
+    notify "Stage 2 시간 초과 - 다음 실행에서 ${STAGE2_OCPU}OCPU/${STAGE2_RAM}GB 재시도"
   fi
 
 elif [[ $stage1_result -eq 2 ]]; then
-  log "⚠️ Stage 1: LimitExceeded - 이미 인스턴스 존재하거나 한도 초과"
-  notify "⚠️ *Stage 1 LimitExceeded* - 이미 인스턴스 존재"
+  log "Stage 1: LimitExceeded - 이미 인스턴스 존재하거나 한도 초과"
+  notify "Stage 1 LimitExceeded - 이미 인스턴스 존재"
 else
-  log "⏳ Stage 1 시간 초과 - 다음 실행에서 재시도"
+  log "Stage 1 시간 초과 - 다음 실행에서 재시도"
 fi
 
 log "=== 스크립트 종료 ==="
